@@ -1,0 +1,145 @@
+name: Publish Ollama DEB to APT repo
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  unauthorized:
+    if: github.actor != 'goabonga' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "❌ Unauthorized: only goabonga or GitHub workflows can trigger this job."
+          exit 1
+
+  publish:
+    if: github.actor == 'goabonga' || github.actor == 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # Checkout the current branch (usually gh-pages)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Download release assets (.deb) into correct APT path
+      - name: Download release assets (.deb)
+        uses: robinraju/release-downloader@v1.10
+        with:
+          tag: ${{ github.ref_name }}
+          fileName: '*.deb'
+          out-file-path: pool/main/o/ollama
+
+      # Install required tools
+      - name: Install dependencies
+        run: sudo apt update && sudo apt install -y dpkg-dev gzip gnupg openssh-client rsync
+
+      # Import the GPG private key used to sign Release files
+      - name: Import GPG private key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --yes --passphrase "$GPG_PASSPHRASE" --import
+
+      # Export public key for users to install
+      - name: Export public GPG key
+        run: |
+          gpg --armor --export "$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5}')" > apt-repo-key.asc
+
+      # Build Packages and Packages.gz for both architectures
+      - name: Generate Packages index
+        run: |
+          mkdir -p dists/stable/main/binary-amd64
+          mkdir -p dists/stable/main/binary-arm64
+
+          dpkg-scanpackages -a amd64 pool/ > dists/stable/main/binary-amd64/Packages
+          dpkg-scanpackages -a arm64 pool/ > dists/stable/main/binary-arm64/Packages
+
+          gzip -kf dists/stable/main/binary-amd64/Packages
+          gzip -kf dists/stable/main/binary-arm64/Packages
+
+      # Generate and sign Release + InRelease files
+      - name: Create and sign Release files
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          cat <<EOF > apt-release.conf
+          APT::FTPArchive::Release {
+            Origin "goabonga";
+            Label "GOABONGA Repository";
+            Suite "stable";
+            Codename "stable";
+            Architectures "amd64 arm64";
+            Components "main";
+            Description "GOABONGA ubuntu packages by GOABONGA";
+          };
+          EOF
+
+          apt-ftparchive -c apt-release.conf release dists/stable > dists/stable/Release
+
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+            -abs -o dists/stable/Release.gpg dists/stable/Release
+
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+            --clearsign -o dists/stable/InRelease dists/stable/Release
+
+      # Generate a clean HTML index listing available .deb files
+      # - name: Generate index.html
+      #   run: |
+      #     cat <<EOF > index.html
+      #       <!DOCTYPE html>
+      #       <html lang="en">
+      #       <head>
+      #         <meta charset="UTF-8">
+      #         <title>APT Repository by GOABONGA</title>
+      #         <meta name="viewport" content="width=device-width, initial-scale=1">
+      #         <style>
+      #           body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 40px auto; padding: 20px; background-color: #f7f9fc; color: #333; }
+      #           code, pre { background-color: #eef2f7; padding: 6px; border-radius: 4px; font-family: monospace; }
+      #           pre { overflow-x: auto; }
+      #           a { color: #0366d6; text-decoration: none; }
+      #         </style>
+      #       </head>
+      #       <body>
+      #         <h1>APT Repository</h1>
+      #         <p>This repository provides APT packages built and maintained by <strong>GOABONGA</strong>.</p>
+      #         <h2>🚀 Configure APT Repository</h2>
+      #         <h3>1. Add GPG Key</h3>
+      #         <pre><code>curl -fsSL https://goabonga.com/apt/apt-repo-key.asc | \
+      #       sudo gpg --dearmor -o /usr/share/keyrings/goabonga-archive-keyring.gpg</code></pre>
+      #         <h3>2. Add Repository to APT Sources</h3>
+      #         <pre><code>echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/goabonga-archive-keyring.gpg] \
+      #       https://goabonga.com/apt stable main" | \
+      #       sudo tee /etc/apt/sources.list.d/goabonga.list</code></pre>
+      #         <hr>
+      #         <p>Maintained with ❤️ by <strong>goabonga</strong>.</p>
+      #       </body>
+      #       </html>
+      #     EOF
+
+      # Setup SSH access using deploy key
+      - name: Setup SSH access
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.APT_DEPLOY_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          HOST="$(echo ${{ secrets.APT_DEPLOY_HOST }} | cut -d@ -f2)"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+      # Upload the final APT structure via rsync (non-destructive)
+      - name: Upload APT repo via rsync
+        run: |
+          rsync -avz \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '.gitignore' \
+            --exclude 'README.md' \
+            --exclude 'debian' \
+            --exclude 'scripts' \
+            --exclude 'apt-release.conf' \
+            -e "ssh -i ~/.ssh/id_ed25519" \
+            ./ ${{ secrets.APT_DEPLOY_HOST }}:${{ secrets.APT_DEPLOY_PATH }}/

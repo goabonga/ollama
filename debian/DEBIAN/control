@@ -1,0 +1,8 @@
+Package: ollama
+Version: 0.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Chris <chris@example.com>
+Description: Ollama – local LLM daemon
+Depends: libc6 (>= 2.31)

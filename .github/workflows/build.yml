@@ -1,0 +1,71 @@
+name: Build Multi-Arch Ollama DEBs
+
+on:
+  push:
+    tags:
+      - 'v*'  # ex: v0.9.7, v0.9.7-rc0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: extract
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install deps
+        run: sudo apt update && sudo apt install -y dpkg-dev curl tar xz-utils jq
+
+      - name: Fetch upstream release info
+        id: upstream
+        run: |
+          curl -sSL \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/ollama/ollama/releases/tags/v${{ steps.extract.outputs.version }} \
+          > upstream.json
+        continue-on-error: true
+
+      - name: Set release body from upstream (if exists)
+        id: set_body
+        run: |
+          if grep -q '"body":' upstream.json; then
+            BODY=$(jq -r '.body' upstream.json)
+          else
+            BODY="Release ${{ steps.extract.outputs.version }}"
+          fi
+          echo "release_body<<EOF
+          $BODY
+          EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Build DEB for ${{ matrix.arch }}
+        run: |
+          ./scripts/build.sh "${{ steps.extract.outputs.version }}" "${{ matrix.arch }}" dist
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: ${{ steps.set_body.outputs.release_body }}
+          files: |
+            dist/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger publish-apt workflow
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/publish.yml/dispatches \
+            -d "{\"ref\":\"${{ github.ref_name }}\"}"

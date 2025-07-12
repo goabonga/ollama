@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove)
+        if systemctl is-active --quiet ollama; then
+            systemctl stop ollama >/dev/null || true
+        fi
+        systemctl daemon-reload >/dev/null || true
+        systemctl daemon-reexec >/dev/null || true
+
+        if id ollama >/dev/null 2>&1; then
+            # Wait briefly to allow process termination
+            sleep 1
+            if ! pgrep -u ollama >/dev/null; then
+                deluser --system --quiet ollama || true
+            else
+                echo "⚠️ User 'ollama' still has running processes; skipping user deletion." >&2
+            fi
+        fi
+        ;;
+    purge)
+        [ -d /usr/share/ollama ] && rm -rf /usr/share/ollama
+        systemctl daemon-reload >/dev/null || true
+        systemctl daemon-reexec >/dev/null || true
+        ;;
+esac
+
+exit 0
