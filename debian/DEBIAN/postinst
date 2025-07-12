@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+if ! id ollama >/dev/null 2>&1; then
+    useradd --no-create-home -r -s /bin/false -U -d /usr/share/ollama ollama
+fi
+
+mkdir -p /usr/share/ollama
+chown ollama:ollama /usr/share/ollama
+chmod 755 /usr/share/ollama
+
+systemctl daemon-reexec || true
+systemctl daemon-reload || true
+systemctl enable ollama || true
+systemctl start ollama.service || true

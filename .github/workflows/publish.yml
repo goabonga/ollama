@@ -1,0 +1,59 @@
+name: Publish Ollama DEB to APT repo
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  unauthorized:
+    if: github.actor != 'goabonga' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "❌ Unauthorized: only goabonga or GitHub workflows can trigger this job."
+          exit 1
+
+  publish:
+    if: github.actor == 'goabonga' || github.actor == 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release assets (.deb)
+        uses: robinraju/release-downloader@v1.10
+        with:
+          tag: ${{ github.ref_name }}
+          fileName: '*.deb'
+          out-file-path: pool/main/o/ollama
+
+      - name: Install dependencies
+        run: sudo apt update && sudo apt install -y openssh-client rsync
+
+      - name: Setup SSH access
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.APT_DEPLOY_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          HOST="$(echo ${{ secrets.APT_DEPLOY_HOST }} | cut -d@ -f2)"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload APT repo via rsync
+        run: |
+          rsync -avz \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '.gitignore' \
+            --exclude 'README.md' \
+            --exclude 'debian' \
+            --exclude 'scripts' \
+            -e "ssh -i ~/.ssh/id_ed25519" \
+            ./ ${{ secrets.APT_DEPLOY_HOST }}:${{ secrets.APT_DEPLOY_PATH }}/
+
+      - name: Trigger remote APT index update
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ${{ secrets.APT_DEPLOY_HOST }} "GPG_PASSPHRASE='${{ secrets.GPG_PASSPHRASE }}' bash ${{ secrets.APT_UPDATE_SCRIPT }}"
